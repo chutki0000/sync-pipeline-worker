@@ -1,0 +1,125 @@
+name: Stream Sync Pipeline
+
+on:
+  schedule:
+    - cron: '0 18 * * *'  # Daily at 6:00 PM UTC (11:30 PM IST)
+
+  workflow_dispatch:
+    inputs:
+      course_id:
+        description: 'Course ID to sync'
+        required: false
+        default: '876795'
+      course_name:
+        description: 'Course Name'
+        required: false
+        default: 'CSE STREAM : Sem-I + Sem-II COMBO'
+      token:
+        description: 'Classplus JWT Token (leave empty to use secret)'
+        required: false
+        default: ''
+      max_videos:
+        description: 'Max videos to process this run'
+        required: false
+        default: '20'
+      max_pdfs:
+        description: 'Max PDFs to process this run'
+        required: false
+        default: '20'
+
+  repository_dispatch:
+    types: [matrix-sync]
+
+jobs:
+  sync_worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Worker
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install FFmpeg & Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r tools/requirements.txt
+
+      - name: Fetch Current Master Index from Server
+        env:
+          SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+          HOST: ${{ secrets.ORACLE_HOST }}
+          USER: ${{ secrets.ORACLE_USER }}
+        run: |
+          mkdir -p ~/.ssh data
+          echo "$SSH_KEY" > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          scp -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no $USER@$HOST:/home/ubuntu/Gateway_Classes/data/master_index.json data/master_index.json || echo "{}" > data/master_index.json
+          echo "✅ Existing master_index loaded from production server"
+
+      - name: Execute Sync Engine
+        env:
+          SYNC_API_ID: ${{ secrets.TG_API_ID }}
+          SYNC_API_HASH: ${{ secrets.TG_API_HASH }}
+          SYNC_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHANNEL_ID: ${{ secrets.TG_CHANNEL_ID }}
+          CLASSPLUS_TOKEN: ${{ github.event.inputs.token || github.event.client_payload.token || secrets.CLASSPLUS_TOKEN }}
+        run: |
+          CID="${{ github.event.inputs.course_id || github.event.client_payload.course_id || '876795' }}"
+          CNAME="${{ github.event.inputs.course_name || github.event.client_payload.course_name || 'CSE STREAM : Sem-I + Sem-II COMBO' }}"
+          MAX_V="${{ github.event.inputs.max_videos || github.event.client_payload.max_videos || '20' }}"
+          MAX_P="${{ github.event.inputs.max_pdfs || github.event.client_payload.max_pdfs || '20' }}"
+
+          echo "=============================================="
+          echo "Starting Sync for Course: $CNAME ($CID)"
+          echo "Limits: Max Videos=$MAX_V, Max PDFs=$MAX_P"
+          echo "=============================================="
+
+          python3 tools/sync_engine.py --course-id "$CID" --course-name "$CNAME" --max-videos "$MAX_V" --max-pdfs "$MAX_P"
+
+      - name: Deploy Updated Master Index to Server
+        if: always()
+        env:
+          HOST: ${{ secrets.ORACLE_HOST }}
+          USER: ${{ secrets.ORACLE_USER }}
+        run: |
+          if [ -f data/master_index.json ]; then
+            scp -i ~/.ssh/oracle_key -o StrictHostKeyChecking=no data/master_index.json $USER@$HOST:/home/ubuntu/Gateway_Classes/data/master_index.json
+            echo "✅ master_index.json updated on Oracle Server"
+          fi
+
+      - name: Notify Admin via Telegram
+        if: always()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_OWNER_ID: ${{ secrets.BOT_OWNER_ID }}
+        run: |
+          CID="${{ github.event.inputs.course_id || github.event.client_payload.course_id || '876795' }}"
+          CNAME="${{ github.event.inputs.course_name || github.event.client_payload.course_name || 'CSE STREAM : Sem-I + Sem-II COMBO' }}"
+          MSG="⚡ *Stream Sync Pipeline Completed!*
+
+📦 *Course:* \`${CNAME}\` (\`${CID}\`)
+✅ Master index refreshed on Oracle Cloud Server.
+📱 Students can now view latest content."
+
+          curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TG_OWNER_ID}" \
+            --data-urlencode "text=${MSG}" \
+            -d parse_mode="Markdown" > /dev/null || true
+          echo "✅ Telegram notification dispatched"
+
+      - name: Cleanup SSH Keys
+        if: always()
+        run: rm -rf ~/.ssh/oracle_key
