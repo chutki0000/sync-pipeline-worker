@@ -2,7 +2,7 @@ name: Stream Sync Pipeline
 
 on:
   schedule:
-    - cron: '0 18 * * *'
+    - cron: '30 0 * * *'  # Strictly once every 24 hours at 06:00 AM IST (00:30 UTC, right after Classplus daily reset)
 
   workflow_dispatch:
     inputs:
