@@ -47,7 +47,9 @@ jobs:
       - name: Install FFmpeg & Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg curl
+          curl -sL "https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.6.0-beta/N_m3u8DL-RE_v0.6.0-beta_linux-x64_20260629.tar.gz" | sudo tar -xz -C /usr/local/bin/
+          chmod +x /usr/local/bin/N_m3u8DL-RE || true
 
       - name: Install Python Dependencies
         run: |
@@ -81,6 +83,10 @@ jobs:
           echo "Limits: Max Videos=$MAX_V, Max PDFs=$MAX_P"
           echo "=============================================="
 
+          # Generate Text Manifest Blueprint
+          python3 tools/sync_engine.py --course-id "$CID" --course-name "$CNAME" --export-txt || true
+
+          # Turbo Sync Execution (N_m3u8DL-RE 16-thread multi-stream)
           python3 tools/sync_engine.py --course-id "$CID" --course-name "$CNAME" --max-videos "$MAX_V" --max-pdfs "$MAX_P"
 
       - name: Deploy Updated Master Index to Server

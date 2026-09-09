@@ -13,6 +13,8 @@ import os
 import sys
 import json
 import time
+import re
+import shutil
 import asyncio
 import urllib.parse
 import subprocess
@@ -108,21 +110,56 @@ def get_signed_stream_url(content_hash_id: str, token: Optional[str] = None) -> 
 def download_and_clean_video(stream_url: str, output_path: Path, title: str) -> bool:
     raw_tmp = output_path.with_name(f"raw_{output_path.name}")
     try:
-        cmd_dl = [
-            "yt-dlp",
-            "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-            "--no-warnings", "--quiet",
-            "--concurrent-fragments", "8",
-            "--no-part",
-            "-o", str(raw_tmp),
-            stream_url
-        ]
-        res = subprocess.run(cmd_dl, timeout=300)
-        if res.returncode != 0 or not raw_tmp.exists():
-            print(f"  [ERR] yt-dlp download failed: {title}")
+        dl_success = False
+
+        # ── 1. TURBO ENGINE: N_m3u8DL-RE (16-thread native Rust downloader) ──
+        n_m3u8_bin = shutil.which("N_m3u8DL-RE") or ("/tmp/N_m3u8DL-RE" if Path("/tmp/N_m3u8DL-RE").exists() else None)
+        if n_m3u8_bin and (".m3u8" in stream_url or "manifest" in stream_url or ".mpd" in stream_url):
+            tmp_dir = output_path.parent / f"re_tmp_{output_path.stem}"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            cmd_re = [
+                str(n_m3u8_bin),
+                stream_url,
+                "--thread-count", "16",
+                "--download-retry-count", "5",
+                "--auto-select",
+                "--save-dir", str(output_path.parent),
+                "--save-name", f"raw_{output_path.stem}",
+                "--tmp-dir", str(tmp_dir),
+                "--del-after-done",
+                "--no-log"
+            ]
+            try:
+                res_re = subprocess.run(cmd_re, timeout=240, capture_output=True)
+                # Find matching output file (.mp4, .mkv, .ts)
+                for cand in output_path.parent.glob(f"raw_{output_path.stem}*"):
+                    if cand.is_file() and cand != output_path and cand.stat().st_size > 1024:
+                        raw_tmp = cand
+                        dl_success = True
+                        break
+            except Exception as re_err:
+                print(f"  [N_m3u8DL-RE] Warning: {re_err}, falling back to yt-dlp...")
+
+        # ── 2. STABLE FALLBACK: yt-dlp ───────────────────────────────────────
+        if not dl_success:
+            cmd_dl = [
+                "yt-dlp",
+                "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+                "--no-warnings", "--quiet",
+                "--concurrent-fragments", "8",
+                "--no-part",
+                "-o", str(raw_tmp),
+                stream_url
+            ]
+            res = subprocess.run(cmd_dl, timeout=300)
+            if res.returncode == 0 and raw_tmp.exists() and raw_tmp.stat().st_size > 1024:
+                dl_success = True
+
+        if not dl_success:
+            print(f"  [ERR] download failed: {title}")
             return False
 
-        # Forensic metadata stripper (-map_metadata -1 for 100% anonymity)
+        # ── 3. FORENSIC SANITIZER (-map_metadata -1 for 100% student anonymity) ─
         cmd_strip = [
             "ffmpeg", "-v", "error", "-y",
             "-i", str(raw_tmp),
@@ -131,13 +168,21 @@ def download_and_clean_video(stream_url: str, output_path: Path, title: str) -> 
             str(output_path)
         ]
         res_strip = subprocess.run(cmd_strip, timeout=120)
-        return res_strip.returncode == 0 and output_path.exists()
+        return res_strip.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1024
     except Exception as e:
         print(f"  [ERR] download_and_clean_video: {e}")
     finally:
-        if raw_tmp.exists():
+        # Cleanup temporary raw downloads
+        for cand in output_path.parent.glob(f"raw_{output_path.stem}*"):
+            if cand.is_file() and cand != output_path:
+                try:
+                    cand.unlink()
+                except Exception:
+                    pass
+        re_tmp = output_path.parent / f"re_tmp_{output_path.stem}"
+        if re_tmp.exists():
             try:
-                raw_tmp.unlink()
+                shutil.rmtree(str(re_tmp), ignore_errors=True)
             except Exception:
                 pass
     return False
@@ -719,6 +764,114 @@ async def sync_course_tree(
 
     return stats["uploaded"]
 
+def export_text_manifest(course_id: str, course_name: str, token: Optional[str] = None) -> Path:
+    """
+    Crawls the Classplus course structure and generates an ultra-clean,
+    human-readable .txt course manifest and syllabus tree map.
+    """
+    from tools.config import get_active_classplus_token
+    token = token or get_active_classplus_token(course_id)
+    manifest_dir = DATA_DIR / "manifests"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r'[^a-zA-Z0-9_\-]', '_', course_name).strip('_')
+    out_file = manifest_dir / f"{course_id}_{slug}.txt"
+
+    master_data = load_master_index()
+    catalog = master_data.get("content_catalog", {})
+
+    print(f"\n=======================================================")
+    print(f"📑 EXPORTING TEXT MANIFEST: [{course_id}] {course_name}")
+    print(f"=======================================================")
+
+    lines = [
+        "=" * 80,
+        "🎓 GATEWAY CLASSES COURSE MANIFEST & SYLLABUS TREE",
+        f"Course Name : {course_name}",
+        f"Course ID   : {course_id}",
+        f"Export Time : {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
+        "=" * 80,
+        ""
+    ]
+
+    total_subjects = 0
+    total_videos = 0
+    total_pdfs = 0
+
+    root_items = fetch_classplus_folder(course_id, "0", token)
+
+    for sub in root_items:
+        content_type = sub.get("contentType")
+        if content_type == 1:
+            total_subjects += 1
+            sub_id = sub["id"]
+            sub_name = sub.get("name", "Unknown Subject").strip()
+            lines.append(f"📂 [SUBJECT {total_subjects}] {sub_name} (Folder ID: {sub_id})")
+
+            unit_items = fetch_classplus_folder(course_id, str(sub_id), token)
+            for unit in unit_items:
+                u_type = unit.get("contentType")
+                if u_type == 1:
+                    unit_id = unit["id"]
+                    unit_name = unit.get("name", "Unknown Unit").strip()
+                    lines.append(f"   └── 📁 [UNIT] {unit_name} (Folder ID: {unit_id})")
+
+                    lectures = fetch_classplus_folder(course_id, str(unit_id), token)
+                    for item in lectures:
+                        item_id = str(item.get("id"))
+                        item_name = item.get("name", "Untitled").strip()
+                        i_type = item.get("contentType")
+                        if i_type == 2 or (item.get("url") and ".m3u8" in item.get("url")):
+                            total_videos += 1
+                            dur = item.get("duration", "--:--")
+                            tg_tag = f"✅ TG #{catalog[item_id]['telegram_msg_id']}" if item_id in catalog else "⏳ PENDING_SYNC"
+                            lines.append(f"       ├── 🎥 [LEC] {item_name} ({dur}) | ID: {item_id} | {tg_tag}")
+                        elif i_type == 3 or item.get("format") == "pdf":
+                            total_pdfs += 1
+                            pdf_url = item.get("url", "")
+                            lines.append(f"       │    └─ 📄 [PDF] {item_name} | ID: {item_id} | URL: {pdf_url}")
+                elif u_type == 2:
+                    total_videos += 1
+                    item_id = str(unit.get("id"))
+                    dur = unit.get("duration", "--:--")
+                    tg_tag = f"✅ TG #{catalog[item_id]['telegram_msg_id']}" if item_id in catalog else "⏳ PENDING_SYNC"
+                    lines.append(f"   ├── 🎥 [LEC] {unit.get('name', 'Untitled').strip()} ({dur}) | ID: {item_id} | {tg_tag}")
+                elif u_type == 3 or unit.get("format") == "pdf":
+                    total_pdfs += 1
+                    item_id = str(unit.get("id"))
+                    lines.append(f"   └── 📄 [PDF] {unit.get('name', 'Untitled').strip()} | ID: {item_id} | URL: {unit.get('url', '')}")
+            lines.append("")
+        elif content_type == 2:
+            total_videos += 1
+            item_id = str(sub.get("id"))
+            dur = sub.get("duration", "--:--")
+            tg_tag = f"✅ TG #{catalog[item_id]['telegram_msg_id']}" if item_id in catalog else "⏳ PENDING_SYNC"
+            lines.append(f"🎥 [ROOT VIDEO] {sub.get('name', 'Untitled').strip()} ({dur}) | ID: {item_id} | {tg_tag}")
+        elif content_type == 3 or sub.get("format") == "pdf":
+            total_pdfs += 1
+            item_id = str(sub.get("id"))
+            lines.append(f"📄 [ROOT PDF] {sub.get('name', 'Untitled').strip()} | ID: {item_id} | URL: {sub.get('url', '')}")
+
+    summary_block = [
+        f"📊 Course Statistics:",
+        f"   - Total Subjects      : {total_subjects}",
+        f"   - Total Video Lectures: {total_videos}",
+        f"   - Total PDF Notes     : {total_pdfs}",
+        f"   - Active in Vault     : {len(catalog)} items synced",
+        "-" * 80,
+        ""
+    ]
+    # Insert summary right below the header
+    for idx, s_line in enumerate(summary_block):
+        lines.insert(6 + idx, s_line)
+
+    content = "\n".join(lines)
+    with open(out_file, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    print(f"✅ [MANIFEST SAVED] {out_file}")
+    print(f"📊 Summary: {total_subjects} Subjects, {total_videos} Videos, {total_pdfs} PDFs")
+    return out_file
+
 async def run_sync():
     import argparse
     parser = argparse.ArgumentParser(description="Gateway Classes Matrix Sync Engine")
@@ -728,7 +881,16 @@ async def run_sync():
     parser.add_argument("--max-videos", type=int, default=MAX_VIDEOS_PER_RUN, help="Max videos to upload this run")
     parser.add_argument("--max-pdfs", type=int, default=MAX_PDFS_PER_RUN, help="Max PDFs to upload this run")
     parser.add_argument("--audit-only", action="store_true", help="Only audit Telegram Vault and display verified state without uploading")
+    parser.add_argument("--export-txt", action="store_true", help="Export course syllabus text manifest (.txt) and exit")
     args = parser.parse_args()
+
+    if args.export_txt:
+        export_text_manifest(
+            course_id=args.course_id,
+            course_name=args.course_name,
+            token=args.token or None
+        )
+        return
 
     app = Client(
         "gateway_sync_worker",
