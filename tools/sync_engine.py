@@ -374,7 +374,7 @@ async def sync_course_tree(
                     m = re.search(r'(?:lec|lecture|class)[-:\s]*([0-9]+)', item_name, re.IGNORECASE)
                     order_num = int(m.group(1)) if m else 0
 
-                    from tools.stream_server import BATCH_ALIASES
+                    from tools.config import BATCH_ALIASES
                     linked_batches = [course_id] + BATCH_ALIASES.get(course_id, [])
 
                     if item_id in catalog and item_id in verified_item_ids:
@@ -490,7 +490,7 @@ async def sync_course_tree(
                     m = re.search(r'(?:lec|lecture|class)[-:\s]*([0-9]+)', item_name, re.IGNORECASE)
                     order_num = int(m.group(1)) if m else (0 if "syllabus" in item_name.lower() or "intro" in item_name.lower() else 999)
 
-                    from tools.stream_server import BATCH_ALIASES
+                    from tools.config import BATCH_ALIASES
                     linked_batches = [course_id] + BATCH_ALIASES.get(course_id, [])
 
                     # ── UNIVERSAL DEDUPLICATION & TELEGRAM VERIFICATION ───
@@ -586,7 +586,7 @@ async def sync_course_tree(
                 )
                 if thumb_file.exists() and thumb_file.stat().st_size > 0:
                     # Cache for stream server
-                    from tools.stream_server import THUMB_DIR
+                    from tools.config import THUMB_DIR
                     cached_thumb = THUMB_DIR / f"{item_id}.jpg"
                     import shutil
                     shutil.copyfile(str(thumb_file), str(cached_thumb))
