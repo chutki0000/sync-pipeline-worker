@@ -224,6 +224,28 @@ async def audit_and_verify_vault(
     print(f"🔍 TELEGRAM VAULT INTEGRITY AUDIT & VERIFICATION")
     print(f"=======================================================")
 
+    if not catalog or len(catalog) < 10:
+        print("  ℹ️ Local catalog is empty/truncated. Restoring latest master_index from Telegram Vault Msg #90...")
+        try:
+            m90 = await client.get_messages(TG_CHANNEL_ID, message_ids=90)
+            if m90 and m90.document:
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+                    tmp_p = tmp.name
+                await client.download_media(m90, file_name=tmp_p)
+                with open(tmp_p, "r", encoding="utf-8") as f:
+                    restored = json.load(f)
+                if restored.get("content_catalog"):
+                    master_data.update(restored)
+                    catalog = master_data.get("content_catalog", {})
+                    courses = master_data.get("courses", {})
+                    save_master_index(master_data)
+                    print(f"  ✅ Restored {len(catalog)} items directly from Telegram Vault Msg #90!")
+                if os.path.exists(tmp_p):
+                    os.remove(tmp_p)
+        except Exception as rest_err:
+            print(f"  ⚠️ Could not restore from Msg #90: {rest_err}")
+
     if not catalog:
         print("  ℹ️ Catalog is empty. No existing uploads to verify.")
         print(f"=======================================================\n")
@@ -335,6 +357,34 @@ async def audit_and_verify_vault(
     print(f"=======================================================\n")
     return verified_item_ids
 
+def extract_hierarchy_metadata(path_stack: List[str]) -> Tuple[str, str, str]:
+    """
+    Extracts (subject_name, sub_version, unit_name) from folder path stack.
+    Handles variable depth hierarchies:
+    - Root level items: (General Studies, "", Syllabus & Introduction)
+    - Subject root items (len=1): (Subject, "", Syllabus & Introduction)
+    - Standard 2-level (len=2):
+        If folder is Version (contains 1.0, 2.0, Version): (Subject, Version, Syllabus & Introduction)
+        Else: (Subject, "", Unit)
+    - 3+ levels (len>=3):
+        If folder[1] is Version: (Subject, folder[1], folder[2])
+        Else: (Subject, "", folder[1])
+    """
+    if not path_stack:
+        return ("General Studies", "", "Syllabus & Introduction")
+    subj = path_stack[0]
+    if len(path_stack) == 1:
+        return (subj, "", "Syllabus & Introduction")
+
+    is_version = bool(re.search(r"(?:1\.0|2\.0|v1|v2|version|edition)", path_stack[1], re.IGNORECASE))
+    if is_version:
+        sub_version = path_stack[1]
+        unit = path_stack[2] if len(path_stack) > 2 else "Syllabus & Introduction"
+    else:
+        sub_version = ""
+        unit = path_stack[1]
+    return (subj, sub_version, unit)
+
 async def sync_course_tree(
     client: Client,
     course_id: str,
@@ -411,9 +461,8 @@ async def sync_course_tree(
                     if not pdf_url:
                         continue
 
-                    # Extract Subject, Unit, and Sequence
-                    subject_name = path_stack[0] if len(path_stack) > 0 else "General Studies"
-                    unit_name = path_stack[1] if len(path_stack) > 1 else "Syllabus & Introduction"
+                    # Extract Subject, Sub-Version, Unit, and Sequence
+                    subject_name, sub_version, unit_name = extract_hierarchy_metadata(path_stack)
 
                     import re
                     m = re.search(r'(?:lec|lecture|class)[-:\s]*([0-9]+)', item_name, re.IGNORECASE)
@@ -428,17 +477,19 @@ async def sync_course_tree(
                             "type": "pdf",
                             "title": existing.get("title", item_name),
                             "subject": subject_name,
+                            "sub_version": sub_version,
                             "unit": unit_name,
                             "order_index": order_num,
                             "telegram_file_id": existing.get("telegram_file_id", ""),
                             "telegram_msg_id": existing.get("telegram_msg_id", 0)
                         }
-                        # 🔗 Auto-link verified alive PDF note to matching video entry in the same unit
+                        # 🔗 Auto-link verified alive PDF note to matching video entry in the same unit & version
                         linked_count = 0
                         for vid_id, vid_info in catalog.items():
                             if (vid_info.get("type") == "video"
                                     and vid_info.get("subject", "").lower() == subject_name.lower()
-                                    and vid_info.get("unit", "").lower() == unit_name.lower()):
+                                    and vid_info.get("unit", "").lower() == unit_name.lower()
+                                    and vid_info.get("sub_version", "").lower() == sub_version.lower()):
                                 if order_num > 0 and vid_info.get("order_index") == order_num:
                                     vid_info["pdf_content_id"] = item_id
                                     linked_count += 1
@@ -475,12 +526,14 @@ async def sync_course_tree(
                                 "type": "pdf",
                                 "title": item_name,
                                 "subject": subject_name,
+                                "sub_version": sub_version,
                                 "unit": unit_name,
                                 "order_index": order_num,
                                 "batch_ids": linked_batches,
                                 "telegram_file_id": file_id,
                                 "telegram_msg_id": msg.id,
                                 "file_size": f"{file_size_mb:.2f} MB",
+                                "file_size_bytes": len(r_pdf.content),
                                 "url": pdf_url,
                                 "uploaded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ")
                             }
@@ -488,6 +541,7 @@ async def sync_course_tree(
                                 "type": "pdf",
                                 "title": item_name,
                                 "subject": subject_name,
+                                "sub_version": sub_version,
                                 "unit": unit_name,
                                 "order_index": order_num,
                                 "telegram_file_id": file_id,
@@ -527,9 +581,8 @@ async def sync_course_tree(
                     content_hash = item.get("contentHashId") or ""
                     duration = item.get("duration", 0)
 
-                    # Extract Subject, Unit, and Sequence
-                    subject_name = path_stack[0] if len(path_stack) > 0 else "General Studies"
-                    unit_name = path_stack[1] if len(path_stack) > 1 else "Syllabus & Introduction"
+                    # Extract Subject, Sub-Version, Unit, and Sequence
+                    subject_name, sub_version, unit_name = extract_hierarchy_metadata(path_stack)
 
                     import re
                     m = re.search(r'(?:lec|lecture|class)[-:\s]*([0-9]+)', item_name, re.IGNORECASE)
@@ -542,6 +595,7 @@ async def sync_course_tree(
                     if item_id in catalog and item_id in verified_item_ids:
                         existing = catalog[item_id]
                         existing.setdefault("subject", subject_name)
+                        existing.setdefault("sub_version", sub_version)
                         existing.setdefault("unit", unit_name)
                         existing.setdefault("batch_ids", linked_batches)
                         existing.setdefault("order_index", order_num)
@@ -552,7 +606,8 @@ async def sync_course_tree(
                             for cat_id, cat_info in catalog.items():
                                 if (cat_info.get("type") == "pdf"
                                         and cat_info.get("subject", "").lower() == subject_name.lower()
-                                        and cat_info.get("unit", "").lower() == unit_name.lower()):
+                                        and cat_info.get("unit", "").lower() == unit_name.lower()
+                                        and cat_info.get("sub_version", "").lower() == sub_version.lower()):
                                     if order_num > 0 and cat_info.get("order_index") == order_num:
                                         pdf_note_id = cat_id
                                         existing["pdf_content_id"] = cat_id
@@ -566,6 +621,7 @@ async def sync_course_tree(
                             "title": existing["title"],
                             "duration": existing.get("duration", duration),
                             "subject": subject_name,
+                            "sub_version": sub_version,
                             "unit": unit_name,
                             "order_index": order_num,
                             "telegram_file_id": existing["telegram_file_id"],
@@ -604,7 +660,7 @@ async def sync_course_tree(
                         stats["downloaded"] += 1
                         print(f"{indent}  📦 Downloaded #{stats['downloaded']} ➔ Queued for parallel upload.")
                         # Put in queue (will pause if uploader is busy)
-                        await queue.put((item_id, item_name, clean_file, duration, current_dict, depth, subject_name, unit_name, order_num, linked_batches))
+                        await queue.put((item_id, item_name, clean_file, duration, current_dict, depth, subject_name, sub_version, unit_name, order_num, linked_batches))
 
         await crawl_folder("0", course_name, course_entry["root_folders"], 0, [])
         await queue.put(None)  # Sentinel to signal download complete
@@ -618,7 +674,7 @@ async def sync_course_tree(
                 queue.task_done()
                 break
 
-            item_id, item_name, clean_file, duration, current_dict, depth, subject_name, unit_name, order_num, linked_batches = job
+            item_id, item_name, clean_file, duration, current_dict, depth, subject_name, sub_version, unit_name, order_num, linked_batches = job
             indent = "  " * depth
             file_size_mb = clean_file.stat().st_size / (1024 * 1024) if clean_file.exists() else 0
 
@@ -640,10 +696,11 @@ async def sync_course_tree(
 
             print(f"{indent}  ☁️ [UPLOADING PARALLEL] {item_name} ({file_size_mb:.1f} MB)...")
             try:
+                sub_ver_str = f" ({sub_version})" if sub_version else ""
                 caption = (
                     f"🎬 {item_name}\n"
                     f"📚 Batch: {', '.join(linked_batches)} ({course_name})\n"
-                    f"📖 Subject: {subject_name}\n"
+                    f"📖 Subject: {subject_name}{sub_ver_str}\n"
                     f"📁 Unit: {unit_name}\n"
                     f"🔢 Order: #{order_num}\n"
                     f"⏱️ Duration: {duration}s"
@@ -658,24 +715,29 @@ async def sync_course_tree(
                 file_id = msg.video.file_id if msg.video else (msg.document.file_id if msg.document else "")
                 msg_id = msg.id
 
-                # Check if a PDF note exists for this unit
+                # Check if a PDF note exists for this unit & version
                 pdf_note_id = None
                 for cat_id, cat_info in catalog.items():
                     if (cat_info.get("type") == "pdf"
                             and cat_info.get("subject", "").lower() == subject_name.lower()
-                            and cat_info.get("unit", "").lower() == unit_name.lower()):
+                            and cat_info.get("unit", "").lower() == unit_name.lower()
+                            and cat_info.get("sub_version", "").lower() == sub_version.lower()):
                         pdf_note_id = cat_id
                         break
 
                 # Update global catalog
+                clean_size_bytes = clean_file.stat().st_size if clean_file.exists() else 0
                 catalog[item_id] = {
                     "type": "video",
                     "title": item_name,
                     "duration": duration,
                     "subject": subject_name,
+                    "sub_version": sub_version,
                     "unit": unit_name,
                     "order_index": order_num,
                     "batch_ids": linked_batches,
+                    "file_size": f"{file_size_mb:.2f} MB",
+                    "file_size_bytes": clean_size_bytes,
                     "telegram_file_id": file_id,
                     "telegram_msg_id": msg_id,
                     "uploaded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -689,6 +751,7 @@ async def sync_course_tree(
                     "title": item_name,
                     "duration": duration,
                     "subject": subject_name,
+                    "sub_version": sub_version,
                     "unit": unit_name,
                     "order_index": order_num,
                     "telegram_file_id": file_id,
@@ -739,26 +802,30 @@ async def sync_course_tree(
             f"⏰ Synced: {time.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
             f"📌 Status: Live Pinned Catalog"
         )
-        if pinned and pinned.document and "#MASTER_INDEX_CATALOG" in (pinned.caption or ""):
-            # Edit in-place! Exactly the same message is updated, zero clutter
+        # In-Place Update dedicated Msg #90 (Never post new document or create duplicate pins!)
+        target_msg_id = 90
+        try:
             await client.edit_message_media(
                 chat_id=TG_CHANNEL_ID,
-                message_id=pinned.id,
+                message_id=target_msg_id,
                 media=InputMediaDocument(
                     media=str(MASTER_INDEX_FILE),
                     caption=caption
                 )
             )
-            print(f"📌 [VAULT IN-PLACE UPDATE] Pinned Msg #{pinned.id} edited in-place with latest master_index.json!")
-        else:
-            # First time setup: upload new document and pin
-            doc_msg = await client.send_document(
-                chat_id=TG_CHANNEL_ID,
-                document=str(MASTER_INDEX_FILE),
-                caption=caption
-            )
-            await client.pin_chat_message(chat_id=TG_CHANNEL_ID, message_id=doc_msg.id)
-            print(f"📌 [VAULT PIN] master_index.json pinned to Telegram Vault (Msg #{doc_msg.id})")
+            print(f"📌 [VAULT IN-PLACE UPDATE] Dedicated Msg #{target_msg_id} edited in-place with latest master_index.json!")
+        except Exception as edit_err:
+            print(f"⚠️ Could not edit dedicated Msg #{target_msg_id} in-place: {edit_err}")
+            if pinned and pinned.document and pinned.id != target_msg_id:
+                try:
+                    await client.edit_message_media(
+                        chat_id=TG_CHANNEL_ID,
+                        message_id=pinned.id,
+                        media=InputMediaDocument(media=str(MASTER_INDEX_FILE), caption=caption)
+                    )
+                    print(f"📌 [VAULT IN-PLACE UPDATE] Pinned Msg #{pinned.id} edited in-place with latest master_index.json!")
+                except Exception as fallback_err:
+                    print(f"⚠️ Fallback edit error: {fallback_err}")
     except Exception as pin_err:
         print(f"⚠️ Telegram vault catalog pin notice: {pin_err}")
 
