@@ -69,6 +69,39 @@ def load_master_index() -> Dict[str, Any]:
 
 def save_master_index(index_data: Dict[str, Any]):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    catalog = index_data.get("content_catalog", {})
+    total_videos = 0
+    total_pdfs = 0
+    total_bytes = 0
+    for item in catalog.values():
+        t = item.get("type", "video")
+        if t == "video":
+            total_videos += 1
+        elif t == "pdf":
+            total_pdfs += 1
+        b = item.get("file_size_bytes")
+        if isinstance(b, (int, float)) and b > 0:
+            total_bytes += int(b)
+        else:
+            fs = str(item.get("file_size", ""))
+            if "GB" in fs:
+                try: total_bytes += int(float(fs.replace("GB", "").strip()) * 1024 * 1024 * 1024)
+                except Exception: pass
+            elif "MB" in fs:
+                try: total_bytes += int(float(fs.replace("MB", "").strip()) * 1024 * 1024)
+                except Exception: pass
+            elif "KB" in fs:
+                try: total_bytes += int(float(fs.replace("KB", "").strip()) * 1024)
+                except Exception: pass
+
+    index_data["vault_stats"] = {
+        "total_items": len(catalog),
+        "total_videos": total_videos,
+        "total_pdfs": total_pdfs,
+        "total_data_bytes": total_bytes,
+        "total_data_gb": round(total_bytes / (1024 * 1024 * 1024), 2)
+    }
+
     temp_file = MASTER_INDEX_FILE.with_suffix(".tmp")
     with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(index_data, f, indent=2, ensure_ascii=False)
@@ -794,11 +827,13 @@ async def sync_course_tree(
     try:
         from pyrogram.types import InputMediaDocument
         chat = await client.get_chat(TG_CHANNEL_ID)
-        pinned = chat.pinned_message
+        v_stats = master_data.get("vault_stats", {})
+        data_gb = v_stats.get("total_data_gb", 0)
         caption = (
             f"📑 #MASTER_INDEX_CATALOG\n"
             f"📚 Batch: [{course_id}] {course_name}\n"
             f"📊 Total Catalog Items: {len(catalog)}\n"
+            f"💾 Total Data: {data_gb} GB\n"
             f"⏰ Synced: {time.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
             f"📌 Status: Live Pinned Catalog"
         )
