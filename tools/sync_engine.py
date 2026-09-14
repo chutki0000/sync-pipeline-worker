@@ -19,7 +19,7 @@ import asyncio
 import urllib.parse
 import subprocess
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 # Ensure root workspace is in sys.path
 BASE_DIR = Path(__file__).resolve().parent.parent
