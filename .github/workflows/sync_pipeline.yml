@@ -77,6 +77,7 @@ jobs:
           CNAME="${{ github.event.inputs.course_name || github.event.client_payload.course_name || 'CSE STREAM : Sem-I + Sem-II COMBO' }}"
           MAX_V="${{ github.event.inputs.max_videos || github.event.client_payload.max_videos || '20' }}"
           MAX_P="${{ github.event.inputs.max_pdfs || github.event.client_payload.max_pdfs || '20' }}"
+          TOKEN_ARG="${{ github.event.inputs.token || github.event.client_payload.token || '' }}"
 
           echo "=============================================="
           echo "Starting Sync for Course: $CNAME ($CID)"
@@ -84,10 +85,10 @@ jobs:
           echo "=============================================="
 
           # Generate Text Manifest Blueprint
-          python3 tools/sync_engine.py --course-id "$CID" --course-name "$CNAME" --export-txt || true
+          python3 tools/sync_engine.py --course-id "$CID" --course-name "$CNAME" --token "$TOKEN_ARG" --export-txt || true
 
           # Turbo Sync Execution (N_m3u8DL-RE 16-thread multi-stream)
-          python3 tools/sync_engine.py --course-id "$CID" --course-name "$CNAME" --max-videos "$MAX_V" --max-pdfs "$MAX_P"
+          python3 tools/sync_engine.py --course-id "$CID" --course-name "$CNAME" --token "$TOKEN_ARG" --max-videos "$MAX_V" --max-pdfs "$MAX_P"
 
       - name: Deploy Updated Master Index to Server
         if: always()

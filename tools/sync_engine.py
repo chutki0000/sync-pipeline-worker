@@ -153,6 +153,9 @@ def download_and_clean_video(stream_url: str, output_path: Path, title: str) -> 
             cmd_re = [
                 str(n_m3u8_bin),
                 stream_url,
+                "--header", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "--header", "Referer: https://web.classplusapp.com/",
+                "--header", "Origin: https://web.classplusapp.com",
                 "--thread-count", "16",
                 "--download-retry-count", "5",
                 "--auto-select",
@@ -166,7 +169,7 @@ def download_and_clean_video(stream_url: str, output_path: Path, title: str) -> 
                 res_re = subprocess.run(cmd_re, timeout=240, capture_output=True)
                 # Find matching output file (.mp4, .mkv, .ts)
                 for cand in output_path.parent.glob(f"raw_{output_path.stem}*"):
-                    if cand.is_file() and cand != output_path and cand.stat().st_size > 1024:
+                    if cand.is_file() and cand != output_path and cand.stat().st_size > 50000:
                         raw_tmp = cand
                         dl_success = True
                         break
@@ -178,6 +181,9 @@ def download_and_clean_video(stream_url: str, output_path: Path, title: str) -> 
             cmd_dl = [
                 "yt-dlp",
                 "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+                "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "--referer", "https://web.classplusapp.com/",
+                "--add-header", "Origin:https://web.classplusapp.com",
                 "--no-warnings", "--quiet",
                 "--concurrent-fragments", "8",
                 "--no-part",
@@ -185,7 +191,7 @@ def download_and_clean_video(stream_url: str, output_path: Path, title: str) -> 
                 stream_url
             ]
             res = subprocess.run(cmd_dl, timeout=300)
-            if res.returncode == 0 and raw_tmp.exists() and raw_tmp.stat().st_size > 1024:
+            if res.returncode == 0 and raw_tmp.exists() and raw_tmp.stat().st_size > 50000:
                 dl_success = True
 
         if not dl_success:
@@ -437,9 +443,14 @@ async def sync_course_tree(
         from tools.config import get_active_classplus_token
         token = get_active_classplus_token(course_id)
         if token:
-            print(f"🔑 [AUTH TOKEN] Using Classplus token for batch {course_id}!")
+            print(f"🔑 [AUTH TOKEN] Using verified Classplus token for batch {course_id}!")
         else:
-            print(f"⚠️ [NO TOKEN] No Classplus token provided for batch {course_id}.")
+            print(f"\n=======================================================")
+            print(f"❌ [ABORT] No valid token found for batch {course_id} ({course_name})!")
+            print(f"⚠️ Fallback to unrelated batch tokens is disabled to prevent preview-only / failed syncs.")
+            print(f"ℹ️ Provide a student token who has purchased batch {course_id} to sync.")
+            print(f"=======================================================\n")
+            return 0
 
     master_data = load_master_index()
 
